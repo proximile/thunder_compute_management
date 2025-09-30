@@ -326,3 +326,636 @@ class ThunderComputeManager:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit - close all SSH connections"""
         self.close_ssh()
+
+    def upload_file(self, instance_id: int, local_path: str, remote_path: str,
+                    create_dirs: bool = True) -> None:
+        """
+        Upload a file from local to remote instance
+        
+        Args:
+            instance_id: Instance ID
+            local_path: Local file path
+            remote_path: Remote destination path
+            create_dirs: Create parent directories if they don't exist
+        
+        Raises:
+            FileNotFoundError: If local file doesn't exist
+            RuntimeError: If upload fails
+        """
+        local_path = Path(local_path).expanduser().resolve()
+        if not local_path.exists():
+            raise FileNotFoundError(f"Local file not found: {local_path}")
+        
+        ssh = self.connect_ssh(instance_id)
+        
+        try:
+            sftp = ssh.open_sftp()
+            
+            # Create parent directories if needed
+            if create_dirs:
+                remote_dir = str(Path(remote_path).parent)
+                try:
+                    sftp.stat(remote_dir)
+                except FileNotFoundError:
+                    # Create directories recursively
+                    dirs_to_create = []
+                    current = remote_dir
+                    while current and current != '/':
+                        try:
+                            sftp.stat(current)
+                            break
+                        except FileNotFoundError:
+                            dirs_to_create.append(current)
+                            current = str(Path(current).parent)
+                    
+                    # Create dirs from parent to child
+                    for dir_path in reversed(dirs_to_create):
+                        sftp.mkdir(dir_path)
+            
+            # Upload the file
+            sftp.put(str(local_path), remote_path)
+            
+            # Preserve file permissions if possible
+            local_stat = local_path.stat()
+            sftp.chmod(remote_path, stat.S_IMODE(local_stat.st_mode))
+            
+            sftp.close()
+            
+        except Exception as e:
+            raise RuntimeError(f"Failed to upload {local_path} to {remote_path}: {e}")
+
+    def download_file(self, instance_id: int, remote_path: str, local_path: str,
+                    create_dirs: bool = True) -> None:
+        """
+        Download a file from remote instance to local
+        
+        Args:
+            instance_id: Instance ID
+            remote_path: Remote file path
+            local_path: Local destination path
+            create_dirs: Create parent directories if they don't exist
+        
+        Raises:
+            FileNotFoundError: If remote file doesn't exist
+            RuntimeError: If download fails
+        """
+        local_path = Path(local_path).expanduser().resolve()
+        
+        # Create local parent directories if needed
+        if create_dirs:
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        ssh = self.connect_ssh(instance_id)
+        
+        try:
+            sftp = ssh.open_sftp()
+            
+            # Check if remote file exists
+            try:
+                sftp.stat(remote_path)
+            except FileNotFoundError:
+                raise FileNotFoundError(f"Remote file not found: {remote_path}")
+            
+            # Download the file
+            sftp.get(remote_path, str(local_path))
+            
+            # Try to preserve permissions
+            try:
+                remote_stat = sftp.stat(remote_path)
+                os.chmod(local_path, stat.S_IMODE(remote_stat.st_mode))
+            except:
+                pass  # Permission preservation is best-effort
+            
+            sftp.close()
+            
+        except FileNotFoundError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"Failed to download {remote_path} to {local_path}: {e}")
+
+    def upload_directory(self, instance_id: int, local_dir: str, remote_dir: str,
+                        recursive: bool = True) -> None:
+        """
+        Upload a directory from local to remote instance
+        
+        Args:
+            instance_id: Instance ID
+            local_dir: Local directory path
+            remote_dir: Remote destination directory
+            recursive: Upload subdirectories recursively
+        
+        Raises:
+            NotADirectoryError: If local path is not a directory
+            RuntimeError: If upload fails
+        """
+        local_dir = Path(local_dir).expanduser().resolve()
+        if not local_dir.is_dir():
+            raise NotADirectoryError(f"Local path is not a directory: {local_dir}")
+        
+        ssh = self.connect_ssh(instance_id)
+        
+        try:
+            sftp = ssh.open_sftp()
+            
+            # Create remote directory if it doesn't exist
+            try:
+                sftp.stat(remote_dir)
+            except FileNotFoundError:
+                sftp.mkdir(remote_dir)
+            
+            # Walk through local directory
+            for root, dirs, files in os.walk(local_dir):
+                # Calculate relative path
+                rel_path = Path(root).relative_to(local_dir)
+                remote_root = str(Path(remote_dir) / rel_path)
+                
+                # Create directories
+                for dir_name in dirs:
+                    remote_subdir = str(Path(remote_root) / dir_name)
+                    try:
+                        sftp.stat(remote_subdir)
+                    except FileNotFoundError:
+                        sftp.mkdir(remote_subdir)
+                
+                # Upload files
+                for file_name in files:
+                    local_file = Path(root) / file_name
+                    remote_file = str(Path(remote_root) / file_name)
+                    sftp.put(str(local_file), remote_file)
+                    
+                    # Preserve permissions
+                    try:
+                        local_stat = local_file.stat()
+                        sftp.chmod(remote_file, stat.S_IMODE(local_stat.st_mode))
+                    except:
+                        pass
+                
+                # If not recursive, only process the top level
+                if not recursive:
+                    break
+            
+            sftp.close()
+            
+        except Exception as e:
+            raise RuntimeError(f"Failed to upload directory {local_dir} to {remote_dir}: {e}")
+
+    def download_directory(self, instance_id: int, remote_dir: str, local_dir: str,
+                        recursive: bool = True) -> None:
+        """
+        Download a directory from remote instance to local
+        
+        Args:
+            instance_id: Instance ID
+            remote_dir: Remote directory path
+            local_dir: Local destination directory
+            recursive: Download subdirectories recursively
+        
+        Raises:
+            NotADirectoryError: If remote path is not a directory
+            RuntimeError: If download fails
+        """
+        local_dir = Path(local_dir).expanduser().resolve()
+        
+        ssh = self.connect_ssh(instance_id)
+        
+        try:
+            sftp = ssh.open_sftp()
+            
+            # Check if remote directory exists
+            remote_stat = sftp.stat(remote_dir)
+            if not stat.S_ISDIR(remote_stat.st_mode):
+                raise NotADirectoryError(f"Remote path is not a directory: {remote_dir}")
+            
+            # Create local directory if it doesn't exist
+            local_dir.mkdir(parents=True, exist_ok=True)
+            
+            def _download_dir(remote_path: str, local_path: Path):
+                """Recursively download directory contents"""
+                for item in sftp.listdir_attr(remote_path):
+                    remote_item = f"{remote_path}/{item.filename}"
+                    local_item = local_path / item.filename
+                    
+                    if stat.S_ISDIR(item.st_mode):
+                        if recursive:
+                            local_item.mkdir(exist_ok=True)
+                            _download_dir(remote_item, local_item)
+                    else:
+                        # Download file
+                        sftp.get(remote_item, str(local_item))
+                        # Preserve permissions
+                        try:
+                            os.chmod(local_item, stat.S_IMODE(item.st_mode))
+                        except:
+                            pass
+            
+            _download_dir(remote_dir, local_dir)
+            sftp.close()
+            
+        except Exception as e:
+            raise RuntimeError(f"Failed to download directory {remote_dir} to {local_dir}: {e}")
+
+    def sync_file(self, instance_id: int, local_path: str, remote_path: str,
+                direction: str = "upload", overwrite_newer: bool = False) -> bool:
+        """
+        Sync a file between local and remote, only transferring if needed
+        
+        Args:
+            instance_id: Instance ID
+            local_path: Local file path
+            remote_path: Remote file path
+            direction: "upload" or "download"
+            overwrite_newer: Overwrite even if destination is newer
+        
+        Returns:
+            True if file was transferred, False if skipped
+            
+        Raises:
+            ValueError: If direction is invalid
+            FileNotFoundError: If source file doesn't exist
+        """
+        if direction not in ("upload", "download"):
+            raise ValueError("Direction must be 'upload' or 'download'")
+        
+        local_path = Path(local_path).expanduser().resolve()
+        ssh = self.connect_ssh(instance_id)
+        
+        try:
+            sftp = ssh.open_sftp()
+            
+            # Get file stats
+            local_exists = local_path.exists()
+            try:
+                remote_stat = sftp.stat(remote_path)
+                remote_exists = True
+            except FileNotFoundError:
+                remote_exists = False
+                remote_stat = None
+            
+            if direction == "upload":
+                if not local_exists:
+                    raise FileNotFoundError(f"Local file not found: {local_path}")
+                
+                if not remote_exists:
+                    # Remote doesn't exist, upload needed
+                    self.upload_file(instance_id, str(local_path), remote_path)
+                    return True
+                
+                # Both exist, compare timestamps
+                local_mtime = local_path.stat().st_mtime
+                remote_mtime = remote_stat.st_mtime
+                
+                if local_mtime > remote_mtime or overwrite_newer:
+                    self.upload_file(instance_id, str(local_path), remote_path)
+                    return True
+                    
+            else:  # download
+                if not remote_exists:
+                    raise FileNotFoundError(f"Remote file not found: {remote_path}")
+                
+                if not local_exists:
+                    # Local doesn't exist, download needed
+                    self.download_file(instance_id, remote_path, str(local_path))
+                    return True
+                
+                # Both exist, compare timestamps
+                local_mtime = local_path.stat().st_mtime
+                remote_mtime = remote_stat.st_mtime
+                
+                if remote_mtime > local_mtime or overwrite_newer:
+                    self.download_file(instance_id, remote_path, str(local_path))
+                    return True
+            
+            sftp.close()
+            return False
+            
+        except Exception as e:
+            if "not found" in str(e).lower():
+                raise
+            raise RuntimeError(f"Failed to sync file: {e}")
+
+    def create_instance(self, 
+                    cpu_cores: int = 4,
+                    template: str = "base",
+                    gpu_type: Optional[str] = None,
+                    num_gpus: Optional[int] = None,
+                    disk_size_gb: int = 100,
+                    mode: str = "production",
+                    wait_for_running: bool = True,
+                    wait_timeout: int = 120) -> Dict[str, Any]:
+        """
+        Create a new ThunderCompute instance
+        
+        Args:
+            cpu_cores: Number of CPU cores (default: 4)
+            template: Instance template to use (default: "base")
+            gpu_type: Type of GPU (e.g., "t4", "a100", None for CPU-only)
+            num_gpus: Number of GPUs (required if gpu_type is specified)
+            disk_size_gb: Disk size in GB (default: 100)
+            mode: Instance mode - "production" or "prototyping" (default: "production")
+            wait_for_running: Wait for instance to be in RUNNING state
+            wait_timeout: Maximum time to wait for instance to start (seconds)
+        
+        Returns:
+            Dictionary containing:
+            - uuid: Instance UUID
+            - key: Instance key
+            - identifier: Instance identifier
+            - instance_id: Extracted instance ID (if available)
+        
+        Raises:
+            ValueError: If GPU configuration is invalid
+            RuntimeError: If instance creation fails
+        """
+        # Validate GPU configuration
+        if gpu_type and not num_gpus:
+            raise ValueError("num_gpus must be specified when gpu_type is provided")
+        if num_gpus and not gpu_type:
+            raise ValueError("gpu_type must be specified when num_gpus is provided")
+        
+        # Build payload
+        payload = {
+            "cpu_cores": cpu_cores,
+            "template": template,
+            "disk_size_gb": disk_size_gb,
+            "mode": mode
+        }
+        
+        if gpu_type:
+            payload["gpu_type"] = gpu_type
+            payload["num_gpus"] = num_gpus
+        
+        # Create instance
+        url = f"{self.api_base_url}/instances/create"
+        response = requests.post(url, json=payload, headers=self.headers)
+        
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as e:
+            error_data = response.json() if response.content else {}
+            raise RuntimeError(f"Failed to create instance: {e}\nDetails: {error_data}")
+        
+        result = response.json()
+        
+        # Invalidate cache to force refresh
+        self._instances_cache = None
+        
+        # Extract instance ID from identifier if present
+        if 'identifier' in result:
+            try:
+                # Assuming identifier format is like "instance_12345" or similar
+                instance_id = int(''.join(filter(str.isdigit, result['identifier'])))
+                result['instance_id'] = instance_id
+            except:
+                pass
+        
+        # Wait for instance to be running if requested
+        if wait_for_running and 'instance_id' in result:
+            print(f"Waiting for instance {result['instance_id']} to start...")
+            if self.wait_for_status(result['instance_id'], "RUNNING", timeout=wait_timeout):
+                print(f"Instance {result['instance_id']} is now running")
+                # Get and add IP to result
+                result['ip'] = self.get_ip(result['instance_id'])
+            else:
+                print(f"Warning: Instance {result['instance_id']} did not reach RUNNING state within {wait_timeout}s")
+        
+        return result
+
+    def delete_instance(self, instance_id: int, confirm: bool = False) -> Dict[str, Any]:
+        """
+        Delete a ThunderCompute instance
+        
+        Args:
+            instance_id: Instance ID to delete
+            confirm: Safety flag - must be True to actually delete
+        
+        Returns:
+            API response dictionary containing:
+            - code: Response code
+            - status: Status string
+            - message: Response message
+            - errors: Any error details
+        
+        Raises:
+            ValueError: If confirm is not True
+            RuntimeError: If deletion fails
+        """
+        if not confirm:
+            raise ValueError("Must set confirm=True to delete an instance. This action cannot be undone!")
+        
+        # Check if instance exists
+        try:
+            instance_info = self.get_instance_info(instance_id)
+            print(f"Deleting instance {instance_id} (Status: {instance_info.get('status')})")
+        except ValueError:
+            raise ValueError(f"Instance {instance_id} not found")
+        
+        # Close any SSH connections to this instance
+        self.close_ssh(instance_id)
+        
+        # Delete the instance
+        url = f"{self.api_base_url}/instances/{instance_id}/delete"
+        response = requests.post(url, headers=self.headers)
+        
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as e:
+            error_data = response.json() if response.content else {}
+            raise RuntimeError(f"Failed to delete instance {instance_id}: {e}\nDetails: {error_data}")
+        
+        result = response.json()
+        
+        # Invalidate cache
+        self._instances_cache = None
+        
+        print(f"Instance {instance_id} deleted successfully")
+        return result
+
+    def modify_instance(self, instance_id: int,
+                    cpu_cores: Optional[int] = None,
+                    gpu_type: Optional[str] = None,
+                    num_gpus: Optional[int] = None,
+                    disk_size_gb: Optional[int] = None,
+                    stop_before_modify: bool = True,
+                    restart_after_modify: bool = True,
+                    wait_timeout: int = 60) -> Dict[str, Any]:
+        """
+        Modify configuration of an existing instance
+        
+        Note: Instance typically needs to be stopped to modify configuration
+        
+        Args:
+            instance_id: Instance ID to modify
+            cpu_cores: New CPU core count (None to keep current)
+            gpu_type: New GPU type (None to keep current, "none" to remove GPUs)
+            num_gpus: New GPU count (None to keep current, 0 to remove GPUs)
+            disk_size_gb: New disk size in GB (None to keep current, must be >= current size)
+            stop_before_modify: Automatically stop instance before modification
+            restart_after_modify: Automatically restart instance after modification
+            wait_timeout: Maximum time to wait for state changes (seconds)
+        
+        Returns:
+            API response dictionary
+        
+        Raises:
+            RuntimeError: If modification fails
+        """
+        # Get current instance state
+        current_info = self.get_instance_info(instance_id)
+        was_running = current_info.get('status') == 'RUNNING'
+        
+        # Stop instance if needed
+        if stop_before_modify and was_running:
+            print(f"Stopping instance {instance_id} for modification...")
+            self.stop_instance(instance_id)
+            if not self.wait_for_status(instance_id, "STOPPED", timeout=wait_timeout):
+                raise RuntimeError(f"Failed to stop instance {instance_id} within {wait_timeout}s")
+        
+        # Build modification payload
+        payload = {}
+        if cpu_cores is not None:
+            payload["cpu_cores"] = cpu_cores
+        
+        # Handle GPU modifications
+        if gpu_type is not None:
+            if gpu_type.lower() == "none":
+                # Remove GPUs
+                payload["num_gpus"] = 0
+            else:
+                payload["gpu_type"] = gpu_type
+                if num_gpus is not None:
+                    payload["num_gpus"] = num_gpus
+        elif num_gpus is not None:
+            payload["num_gpus"] = num_gpus
+        
+        if disk_size_gb is not None:
+            # Validate disk size (can only increase)
+            current_disk = current_info.get('disk_size_gb', 0)
+            if disk_size_gb < current_disk:
+                raise ValueError(f"Cannot reduce disk size from {current_disk}GB to {disk_size_gb}GB")
+            payload["disk_size_gb"] = disk_size_gb
+        
+        if not payload:
+            print("No modifications specified")
+            return {"message": "No changes made"}
+        
+        # Modify the instance
+        url = f"{self.api_base_url}/instances/{instance_id}/modify"
+        response = requests.post(url, json=payload, headers=self.headers)
+        
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as e:
+            error_data = response.json() if response.content else {}
+            raise RuntimeError(f"Failed to modify instance {instance_id}: {e}\nDetails: {error_data}")
+        
+        result = response.json()
+        
+        # Invalidate cache
+        self._instances_cache = None
+        
+        print(f"Instance {instance_id} modified successfully")
+        
+        # Restart if requested and was running
+        if restart_after_modify and was_running:
+            print(f"Restarting instance {instance_id}...")
+            self.start_instance(instance_id)
+            if self.wait_for_status(instance_id, "RUNNING", timeout=wait_timeout):
+                print(f"Instance {instance_id} is running again")
+            else:
+                print(f"Warning: Instance {instance_id} did not restart within {wait_timeout}s")
+        
+        return result
+
+    def clone_instance(self, source_instance_id: int,
+                    new_name: Optional[str] = None,
+                    cpu_cores: Optional[int] = None,
+                    gpu_type: Optional[str] = None,
+                    num_gpus: Optional[int] = None,
+                    disk_size_gb: Optional[int] = None,
+                    start_after_create: bool = True) -> Dict[str, Any]:
+        """
+        Clone an existing instance with optional modifications
+        
+        Args:
+            source_instance_id: Instance ID to clone from
+            new_name: Name for the new instance (optional)
+            cpu_cores: Override CPU cores (None to use source config)
+            gpu_type: Override GPU type (None to use source config)
+            num_gpus: Override GPU count (None to use source config)
+            disk_size_gb: Override disk size (None to use source config)
+            start_after_create: Start the new instance after creation
+        
+        Returns:
+            New instance information
+        
+        Raises:
+            RuntimeError: If cloning fails
+        """
+        # Get source instance configuration
+        source_info = self.get_instance_info(source_instance_id)
+        
+        # Build configuration for new instance
+        config = {
+            'cpu_cores': cpu_cores or source_info.get('cpu_cores', 4),
+            'template': source_info.get('template', 'base'),
+            'gpu_type': gpu_type or source_info.get('gpu_type'),
+            'num_gpus': num_gpus if num_gpus is not None else source_info.get('num_gpus'),
+            'disk_size_gb': disk_size_gb or source_info.get('disk_size_gb', 100),
+            'mode': source_info.get('mode', 'production')
+        }
+        
+        print(f"Cloning instance {source_instance_id} with config: {config}")
+        
+        # Create the new instance
+        new_instance = self.create_instance(
+            wait_for_running=start_after_create,
+            **config
+        )
+        
+        if new_name and 'instance_id' in new_instance:
+            print(f"New instance created: {new_instance['instance_id']}")
+            # Note: API doesn't support naming, but you could track this locally
+        
+        return new_instance
+
+    def get_instance_cost_estimate(self, instance_id: int,
+                                hours: float = 1.0) -> Dict[str, float]:
+        """
+        Estimate the cost for running an instance
+        
+        Args:
+            instance_id: Instance ID
+            hours: Number of hours to estimate for
+        
+        Returns:
+            Dictionary with cost breakdown (estimated)
+        
+        Note: These are example rates - check Thunder Compute pricing for actual rates
+        """
+        info = self.get_instance_info(instance_id)
+        
+        # Example pricing (replace with actual Thunder Compute rates)
+        cpu_rate = 0.01  # per core per hour
+        gpu_rates = {
+            't4': 0.35,
+            'a100xl': 2.50,
+        }
+        storage_rate = 0.0001  # per GB per hour
+        
+        cpu_cost = info.get('cpu_cores', 0) * cpu_rate * hours
+        
+        gpu_cost = 0
+        if info.get('gpu_type') and info.get('num_gpus'):
+            gpu_type = info['gpu_type'].lower()
+            gpu_cost = gpu_rates.get(gpu_type, 1.0) * info['num_gpus'] * hours
+        
+        storage_cost = info.get('disk_size_gb', 0) * storage_rate * hours
+        
+        return {
+            'cpu_cost': round(cpu_cost, 4),
+            'gpu_cost': round(gpu_cost, 4),
+            'storage_cost': round(storage_cost, 4),
+            'total_cost': round(cpu_cost + gpu_cost + storage_cost, 4),
+            'hours': hours,
+            'note': 'Estimated costs - check Thunder Compute for actual pricing'
+        }
