@@ -5,39 +5,180 @@ import time
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
 import paramiko
-
+import re
+import shutil
+import subprocess
+import stat
 
 class ThunderComputeManager:
     """Manages ThunderCompute instances with SSH and tmux capabilities"""
     
-    def __init__(self, api_key_path: str = "api_key.txt", 
-                 ssh_key_path: str = "./rsa_key_1",
-                 username: str = "ubuntu",
-                 port: int = 22):
+    def __init__(self, api_key_path: str = "./secrets/api_key.txt", 
+                secrets_dir: str = "./secrets",
+                username: str = "ubuntu",
+                port: int = 22,
+                auto_setup_keys: bool = True):
         """
         Initialize the ThunderCompute manager
         
         Args:
-            api_key_path: Path to API key file
-            ssh_key_path: Path to SSH private key
+            api_key_path: Path to API key file (default: ./secrets/api_key.txt)
+            secrets_dir: Directory for storing SSH keys and API key
             username: SSH username (default: ubuntu)
             port: SSH port (default: 22)
+            auto_setup_keys: Automatically setup SSH keys when connecting to instances
         """
         self.api_base_url = "https://api.thundercompute.com:8443"
+        
+        # Ensure secrets directory exists before loading API key
+        self.secrets_dir = Path(secrets_dir).resolve()
+        self.secrets_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Load API key with proper path handling
         self.token = self._load_api_key(api_key_path)
         self.headers = {"Authorization": f"Bearer {self.token}"}
-        self.ssh_key_path = Path(ssh_key_path).expanduser().resolve()
         self.username = username
         self.port = port
-        self._ssh_connections = {}  # Cache SSH connections
+        self.auto_setup_keys = auto_setup_keys
+        self._ssh_connections = {}
+        self._instance_keys = {}  # Maps instance_id -> ssh_key_path
         self._instances_cache = None
         self._cache_time = 0
-        self._cache_ttl = 30  # Cache TTL in seconds
+        self._cache_ttl = 30
         
     def _load_api_key(self, path: str) -> str:
-        """Load API key from file"""
-        with open(path, "r") as f:
-            return f.read().strip()
+        """
+        Load API key from file
+        
+        Args:
+            path: Path to API key file (can be relative or absolute)
+            
+        Returns:
+            API key string
+            
+        Raises:
+            FileNotFoundError: If API key file doesn't exist
+            ValueError: If API key file is empty
+        """
+        # Handle path resolution
+        api_key_path = Path(path).expanduser().resolve()
+        
+        # If the path doesn't exist and it's just a filename, try the secrets directory
+        if not api_key_path.exists() and not os.path.dirname(path):
+            api_key_path = self.secrets_dir / path
+        
+        if not api_key_path.exists():
+            raise FileNotFoundError(
+                f"API key file not found at: {api_key_path}\n"
+                f"Please ensure the API key is saved in {api_key_path}"
+            )
+        
+        try:
+            with open(api_key_path, "r") as f:
+                api_key = f.read().strip()
+        except PermissionError:
+            raise PermissionError(f"Permission denied reading API key from: {api_key_path}")
+        except Exception as e:
+            raise RuntimeError(f"Error reading API key from {api_key_path}: {e}")
+        
+        if not api_key:
+            raise ValueError(f"API key file is empty: {api_key_path}")
+        
+        print(f"API key loaded from: {api_key_path}")
+        return api_key
+    
+    @classmethod
+    def from_secrets(cls, secrets_dir: str = "./secrets",
+                    auto_setup_keys: bool = True,
+                    **kwargs):
+        """
+        Convenience factory method to create manager with secrets directory defaults
+        
+        Args:
+            secrets_dir: Directory containing api_key.txt and SSH keys
+            auto_setup_keys: Automatically setup SSH keys when needed
+            **kwargs: Additional arguments to pass to __init__
+            
+        Returns:
+            Configured ThunderComputeManager instance
+            
+        Example:
+            # Create manager that will auto-setup keys as needed
+            manager = ThunderComputeManager.from_secrets()
+            
+            # Then connect to any instance - keys will be handled automatically
+            ssh = manager.connect_ssh(12345)
+        """
+        api_key_path = str(Path(secrets_dir) / "api_key.txt")
+        
+        return cls(
+            api_key_path=api_key_path,
+            secrets_dir=secrets_dir,
+            auto_setup_keys=auto_setup_keys,
+            **kwargs
+        )
+
+    def validate_secrets_setup(self, instance_ids: Optional[list[int]] = None) -> Dict[str, Any]:
+        """
+        Validate that secrets are properly configured
+        
+        Args:
+            instance_ids: Optional list of instance IDs to check SSH keys for
+        
+        Returns:
+            Dictionary with validation results:
+            - api_key_valid: Whether API key is loaded
+            - secrets_dir: Path to secrets directory
+            - instance_keys: Status of SSH keys for each instance
+            - can_connect: Whether API connection works
+        """
+        results = {
+            'secrets_dir': str(self.secrets_dir),
+            'api_key_valid': bool(self.token),
+            'can_connect': False,
+            'instance_keys': {}
+        }
+        
+        # Test API connection
+        try:
+            instances = self.list_instances()
+            results['can_connect'] = True
+            results['instance_count'] = len(instances)
+            
+            # If no instance_ids specified, check all available instances
+            if instance_ids is None and instances:
+                instance_ids = [int(iid) for iid in instances.keys()]
+        except Exception as e:
+            results['connection_error'] = str(e)
+        
+        # Check SSH keys for specified instances
+        if instance_ids:
+            for instance_id in instance_ids:
+                key_info = {
+                    'instance_id': instance_id,
+                    'key_exists': False,
+                    'key_path': None,
+                    'permissions_ok': False
+                }
+                
+                try:
+                    key_path = self.secrets_dir / f"id_rsa_instance_{instance_id}"
+                    key_info['key_path'] = str(key_path)
+                    
+                    if key_path.exists():
+                        key_info['key_exists'] = True
+                        mode = oct(key_path.stat().st_mode)[-3:]
+                        key_info['permissions'] = mode
+                        key_info['permissions_ok'] = mode in ('600', '400')
+                    else:
+                        key_info['ssh_config_exists'] = self.get_ssh_config_info(instance_id) is not None
+                        
+                except Exception as e:
+                    key_info['error'] = str(e)
+                
+                results['instance_keys'][instance_id] = key_info
+        
+        return results
     
     def list_instances(self, force_refresh: bool = False) -> Dict[str, Any]:
         """
@@ -137,12 +278,31 @@ class ThunderComputeManager:
         if not ip:
             raise ValueError(f"Instance {instance_id} has no IP address (not running?)")
         
+        # Get or setup SSH key for this specific instance
+        if instance_id not in self._instance_keys:
+            if self.auto_setup_keys:
+                # Auto-setup key for this instance
+                key_path = self.ensure_rsa_key(instance_id, str(self.secrets_dir))
+                self._instance_keys[instance_id] = key_path
+            else:
+                # Try to find existing key
+                key_path = self.secrets_dir / f"id_rsa_instance_{instance_id}"
+                if key_path.exists():
+                    self._instance_keys[instance_id] = str(key_path)
+                else:
+                    raise FileNotFoundError(
+                        f"SSH key not found for instance {instance_id} at: {key_path}\n"
+                        f"Run 'manager.ensure_rsa_key({instance_id})' to set it up."
+                    )
+        
+        ssh_key_path = Path(self._instance_keys[instance_id])
+        
         # Verify SSH key exists
-        if not self.ssh_key_path.exists():
-            raise FileNotFoundError(f"SSH key not found at: {self.ssh_key_path}")
+        if not ssh_key_path.exists():
+            raise FileNotFoundError(f"SSH key not found at: {ssh_key_path}")
         
         # Load SSH key
-        pkey = self._load_ssh_key()
+        pkey = self._load_ssh_key_from_path(ssh_key_path)
         
         # Create SSH connection
         ssh = paramiko.SSHClient()
@@ -164,14 +324,22 @@ class ThunderComputeManager:
         return ssh
     
     def _load_ssh_key(self) -> paramiko.PKey:
-        """Load SSH private key"""
+        """Load SSH private key (deprecated - use _load_ssh_key_from_path)"""
+        # This method is kept for backward compatibility
+        if hasattr(self, 'ssh_key_path'):
+            return self._load_ssh_key_from_path(self.ssh_key_path)
+        else:
+            raise RuntimeError("No default SSH key path configured")
+    
+    def _load_ssh_key_from_path(self, key_path: Path) -> paramiko.PKey:
+        """Load SSH private key from specific path"""
         load_errors = []
         for loader in (paramiko.RSAKey, paramiko.ECDSAKey, paramiko.Ed25519Key):
             try:
-                return loader.from_private_key_file(str(self.ssh_key_path))
+                return loader.from_private_key_file(str(key_path))
             except Exception as e:
                 load_errors.append(e)
-        raise ValueError(f"Failed to load key {self.ssh_key_path}: {load_errors[-1]}")
+        raise ValueError(f"Failed to load key {key_path}: {load_errors[-1]}")
     
     def _run_ssh_command(self, ssh: paramiko.SSHClient, cmd: str, 
                         timeout: Optional[float] = 30.0) -> Tuple[int, str, str]:
@@ -959,3 +1127,320 @@ class ThunderComputeManager:
             'hours': hours,
             'note': 'Estimated costs - check Thunder Compute for actual pricing'
         }
+
+    def ensure_rsa_key(self, instance_id: int, 
+                    secrets_dir: str = "./secrets",
+                    force_refresh: bool = False) -> str:
+        """
+        Ensure RSA key exists in secrets directory for the given instance.
+        Extracts from ~/.ssh/config if needed, runs 'tnr connect' if entry missing.
+        
+        Args:
+            instance_id: Thunder Compute instance ID
+            secrets_dir: Local directory to store RSA keys (default: ./secrets)
+            force_refresh: Force re-extraction even if key exists
+        
+        Returns:
+            Path to the RSA key file in secrets directory
+        
+        Raises:
+            RuntimeError: If unable to obtain RSA key
+        """
+        # Create secrets directory if it doesn't exist
+        secrets_path = Path(secrets_dir).resolve()
+        secrets_path.mkdir(parents=True, exist_ok=True)
+        
+        # Expected key filename in secrets directory
+        key_filename = f"id_rsa_instance_{instance_id}"
+        local_key_path = secrets_path / key_filename
+        
+        # Check if key already exists in secrets
+        if local_key_path.exists() and not force_refresh:
+            print(f"RSA key already exists at {local_key_path}")
+            return str(local_key_path)
+        
+        # Parse SSH config to find the key
+        ssh_config_path = Path.home() / ".ssh" / "config"
+        if not ssh_config_path.exists():
+            raise RuntimeError(f"SSH config not found at {ssh_config_path}")
+        
+        # Try to find the key path from SSH config
+        key_path = self._parse_ssh_config_for_key(instance_id, ssh_config_path)
+        
+        # If not found, try to generate it with tnr connect
+        if not key_path:
+            print(f"No SSH config entry found for tnr-{instance_id}, attempting 'tnr connect {instance_id}'...")
+            
+            # Check if tnr command is available
+            if not self._check_tnr_available():
+                raise RuntimeError(
+                    f"SSH config entry for tnr-{instance_id} not found and 'tnr' command not available. "
+                    f"Please run 'tnr connect {instance_id}' on a machine with Thunder Compute CLI installed."
+                )
+            
+            # Run tnr connect
+            try:
+                result = subprocess.run(
+                    ["tnr", "connect", str(instance_id)],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(f"'tnr connect {instance_id}' failed: {result.stderr}")
+                print(f"Successfully ran 'tnr connect {instance_id}'")
+                
+                # Re-parse SSH config
+                key_path = self._parse_ssh_config_for_key(instance_id, ssh_config_path)
+                if not key_path:
+                    raise RuntimeError(
+                        f"SSH config entry still not found after running 'tnr connect {instance_id}'"
+                    )
+            except subprocess.TimeoutExpired:
+                raise RuntimeError(f"'tnr connect {instance_id}' timed out")
+            except FileNotFoundError:
+                raise RuntimeError("'tnr' command not found in PATH")
+        
+        # Verify the source key file exists
+        source_key_path = Path(key_path)
+        if not source_key_path.exists():
+            raise RuntimeError(f"RSA key file not found at {source_key_path}")
+        
+        # Copy the key to secrets directory
+        shutil.copy2(source_key_path, local_key_path)
+        
+        # Set appropriate permissions (read/write for owner only)
+        os.chmod(local_key_path, 0o600)
+        
+        print(f"RSA key copied to {local_key_path}")
+        return str(local_key_path)
+
+    def _parse_ssh_config_for_key(self, instance_id: int, 
+                                ssh_config_path: Path) -> Optional[str]:
+        """
+        Parse SSH config file to find IdentityFile for tnr-{instance_id}
+        
+        Args:
+            instance_id: Thunder Compute instance ID
+            ssh_config_path: Path to SSH config file
+        
+        Returns:
+            Path to RSA key file, or None if not found
+        """
+        host_pattern = f"tnr-{instance_id}"
+        
+        try:
+            with open(ssh_config_path, 'r') as f:
+                lines = f.readlines()
+            
+            in_target_host = False
+            for line in lines:
+                line = line.strip()
+                
+                # Check if we're entering the target host section
+                if line.startswith("Host "):
+                    hosts = line[5:].strip().split()
+                    in_target_host = host_pattern in hosts
+                    continue
+                
+                # If we're in the target host section, look for IdentityFile
+                if in_target_host and line.startswith("IdentityFile"):
+                    # Extract the path (handle quotes)
+                    match = re.match(r'IdentityFile\s+"?([^"]+)"?', line)
+                    if match:
+                        identity_file = match.group(1)
+                        # Expand home directory if present
+                        identity_file = os.path.expanduser(identity_file)
+                        print(f"Found IdentityFile for tnr-{instance_id}: {identity_file}")
+                        return identity_file
+            
+            return None
+            
+        except Exception as e:
+            print(f"Error parsing SSH config: {e}")
+            return None
+
+    def _check_tnr_available(self) -> bool:
+        """Check if 'tnr' command is available in PATH"""
+        try:
+            result = subprocess.run(
+                ["which", "tnr"],
+                capture_output=True,
+                timeout=5
+            )
+            return result.returncode == 0
+        except:
+            return False
+
+    def setup_instance_keys(self, instance_ids: list[int],
+                        secrets_dir: str = "./secrets",
+                        force_refresh: bool = False) -> dict[int, str]:
+        """
+        Setup RSA keys for multiple instances at once
+        
+        Args:
+            instance_ids: List of instance IDs
+            secrets_dir: Local directory to store RSA keys
+        
+        Returns:
+            Dictionary mapping instance_id to key_path
+        """
+        key_paths = {}
+        
+        for instance_id in instance_ids:
+            try:
+                key_path = self.ensure_rsa_key(instance_id, secrets_dir, force_refresh)
+                key_paths[instance_id] = key_path
+            except Exception as e:
+                print(f"Warning: Failed to setup key for instance {instance_id}: {e}")
+                key_paths[instance_id] = None
+        
+        return key_paths
+
+    def get_ssh_config_info(self, instance_id: int) -> Optional[dict]:
+        """
+        Get complete SSH configuration info for a Thunder Compute instance
+        
+        Args:
+            instance_id: Thunder Compute instance ID
+        
+        Returns:
+            Dictionary with SSH config details, or None if not found
+        """
+        ssh_config_path = Path.home() / ".ssh" / "config"
+        if not ssh_config_path.exists():
+            return None
+        
+        host_pattern = f"tnr-{instance_id}"
+        config_info = {
+            'host': host_pattern,
+            'hostname': None,
+            'user': None,
+            'identity_file': None,
+            'port': 22
+        }
+        
+        try:
+            with open(ssh_config_path, 'r') as f:
+                lines = f.readlines()
+            
+            in_target_host = False
+            for line in lines:
+                line = line.strip()
+                
+                # Check if we're entering the target host section
+                if line.startswith("Host "):
+                    hosts = line[5:].strip().split()
+                    in_target_host = host_pattern in hosts
+                    continue
+                
+                if in_target_host:
+                    if line.startswith("HostName"):
+                        config_info['hostname'] = line.split(None, 1)[1].strip()
+                    elif line.startswith("User"):
+                        config_info['user'] = line.split(None, 1)[1].strip()
+                    elif line.startswith("IdentityFile"):
+                        match = re.match(r'IdentityFile\s+"?([^"]+)"?', line)
+                        if match:
+                            config_info['identity_file'] = os.path.expanduser(match.group(1))
+                    elif line.startswith("Port"):
+                        config_info['port'] = int(line.split(None, 1)[1].strip())
+            
+            # Return None if we didn't find the essential info
+            if not config_info['hostname'] or not config_info['identity_file']:
+                return None
+                
+            return config_info
+            
+        except Exception as e:
+            print(f"Error reading SSH config: {e}")
+            return None
+
+    def update_init_params_from_secrets(self, instance_id: int,
+                                    secrets_dir: str = "./secrets") -> None:
+        """
+        Update the manager's SSH key path to use the local secrets directory
+        
+        Args:
+            instance_id: Instance ID to configure for
+            secrets_dir: Local secrets directory
+        """
+        # Ensure the key exists in secrets
+        local_key_path = self.ensure_rsa_key(instance_id, secrets_dir)
+        
+        # Update the instance-specific key mapping
+        self._instance_keys[instance_id] = local_key_path
+        print(f"Updated SSH key path for instance {instance_id}: {local_key_path}")
+    
+    def list_instance_keys(self) -> Dict[int, str]:
+        """
+        List all SSH keys present in the secrets directory
+        
+        Returns:
+            Dictionary mapping instance_id to key file path
+        """
+        keys = {}
+        pattern = re.compile(r'id_rsa_instance_(\d+)')
+        
+        for file in self.secrets_dir.iterdir():
+            match = pattern.match(file.name)
+            if match:
+                instance_id = int(match.group(1))
+                keys[instance_id] = str(file)
+        
+        return keys
+
+    def setup_all_instance_keys(self, force_refresh: bool = False) -> Dict[int, str]:
+        """
+        Setup SSH keys for all available instances
+        
+        Args:
+            force_refresh: Force re-extraction even if keys exist
+        
+        Returns:
+            Dictionary mapping instance_id to key_path
+        """
+        instances = self.list_instances()
+        instance_ids = [int(iid) for iid in instances.keys()]
+        
+        return self.setup_instance_keys(instance_ids, str(self.secrets_dir), force_refresh)
+
+    def cleanup_ssh_connections(self):
+        """Close all SSH connections"""
+        self.close_ssh()
+
+
+# Example usage patterns with the updated per-instance key handling:
+if __name__ == "__main__":
+    # Method 1: Create manager that handles keys automatically
+    manager = ThunderComputeManager()  # Will auto-setup keys as needed
+    
+    # Method 2: Using the convenience factory method
+    manager = ThunderComputeManager.from_secrets()
+    
+    # Method 3: Disable auto key setup (manual key management)
+    manager_manual = ThunderComputeManager(auto_setup_keys=False)
+    
+    # Connect to different instances - each uses its own key
+    try:
+        # Connect to instance 12345 (will auto-setup key if needed)
+        ssh1 = manager.connect_ssh(12345)
+        
+        # Connect to instance 67890 (different key)
+        ssh2 = manager.connect_ssh(67890)
+        
+        # List all available instance keys
+        available_keys = manager.list_instance_keys()
+        print(f"Available SSH keys: {available_keys}")
+        
+        # Validate setup for specific instances
+        validation = manager.validate_secrets_setup(instance_ids=[12345, 67890])
+        print(json.dumps(validation, indent=2))
+        
+        # Setup keys for all instances at once
+        all_keys = manager.setup_all_instance_keys()
+        print(f"Setup keys for instances: {list(all_keys.keys())}")
+        
+    finally:
+        # Cleanup all SSH connections
+        manager.cleanup_ssh_connections()
