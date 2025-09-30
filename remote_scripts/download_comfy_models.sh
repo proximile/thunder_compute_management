@@ -55,12 +55,6 @@ comfy model download \
     --relative-path comfy/ComfyUI/models/loras \
     --filename Qwen-Image-Lightning-4steps-V1.0.safetensors
 
-echo "Downloading Qwen-Image Lightning 8-step LoRA v1.0..."
-comfy model download \
-    --url https://huggingface.co/lightx2v/Qwen-Image-Lightning/resolve/main/Qwen-Image-Lightning-8steps-V1.0.safetensors \
-    --relative-path comfy/ComfyUI/models/loras \
-    --filename Qwen-Image-Lightning-8steps-V1.0.safetensors
-
 echo "Downloading Qwen-Image Lightning 8-step LoRA v1.1 (latest)..."
 comfy model download \
     --url https://huggingface.co/lightx2v/Qwen-Image-Lightning/resolve/main/Qwen-Image-Lightning-8steps-V1.1.safetensors \
@@ -91,15 +85,6 @@ comfy model download \
     --relative-path comfy/ComfyUI/models/loras \
     --filename Qwen-Image-Edit-Lightning-8steps-V1.0.safetensors
 
-# Optional: Download Qwen-Image-Edit 2509 (requires authentication - skipping for now)
-echo "NOTE: Skipping Qwen-Image-Edit 2509 - requires HF token authentication"
-# To enable, set HF token with: comfy model download --set-hf-api-token YOUR_TOKEN
-# Then uncomment below:
-# comfy model download \
-#     --url https://huggingface.co/Comfy-Org/Qwen-Image-Edit_2509_ComfyUI/resolve/main/split_files/diffusion_models/qwen_image_edit_2509_fp8_e4m3fn.safetensors \
-#     --relative-path comfy/ComfyUI/models/diffusion_models \
-#     --filename qwen_image_edit_2509_fp8_e4m3fn.safetensors
-
 # ===================================
 # SECTION 4: WAN 2.2 BASE MODELS
 # ===================================
@@ -109,27 +94,15 @@ echo "=== Section 4: Wan 2.2 Base Models ==="
 # Use Kijai's working repository for Wan 2.2 models (correct URLs)
 echo "Downloading Wan2.2 14B T2V model..."
 comfy model download \
-    --url https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/resolve/main/T2V/Wan2_2-T2V-A14B-HIGH_4_steps-250928-dyno-lightx2v_fp8_e4m3fn_scaled_KJ.safetensors \
+    --url https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/resolve/main/I2V/Wan2_2-I2V-A14B-HIGH_fp8_e5m2_scaled_KJ.safetensors \
     --relative-path comfy/ComfyUI/models/diffusion_models \
-    --filename Wan2_2-T2V-A14B-HIGH_4_steps-250928-dyno-lightx2v_fp8_e4m3fn_scaled_KJ.safetensors
+    --filename Wan2_2-I2V-A14B-HIGH_fp8_e5m2_scaled_KJ.safetensors
 
-echo "Downloading Wan2.2 14B I2V AniSora model..."
 comfy model download \
-    --url https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/resolve/main/I2V/AniSora/Wan2_2-I2V_AniSoraV3_2_LOW_14B_fp8_e4m3fn_scaled_KJ.safetensors \
+    --url https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/resolve/main/I2V/Wan2_2-I2V-A14B-LOW_fp8_e5m2_scaled_KJ.safetensors \
     --relative-path comfy/ComfyUI/models/diffusion_models \
-    --filename Wan2_2-I2V_AniSoraV3_2_LOW_14B_fp8_e4m3fn_scaled_KJ.safetensors
+    --filename Wan2_2-I2V-A14B-LOW_fp8_e5m2_scaled_KJ.safetensors
 
-echo "Downloading Wan2.2 TI2V 5B model..."
-comfy model download \
-    --url https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/resolve/main/Wan2_2-TI2V-5B_fp8_e5m2_scaled_KJ.safetensors \
-    --relative-path comfy/ComfyUI/models/diffusion_models \
-    --filename Wan2_2-TI2V-5B_fp8_e5m2_scaled_KJ.safetensors
-
-#echo "Downloading Wan2.2 5B model (TI2V - Text+Image to Video)..."
-#comfy model download \
-#    --url https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/wan2.2_ti2v_5B_fp16.safetensors \
-#    --relative-path comfy/ComfyUI/models/diffusion_models \
-#    --filename wan2.2_ti2v_5B_fp16.safetensors
 
 # Wan VAE (shared across versions)
 echo "Downloading Wan VAE model..."
@@ -146,44 +119,10 @@ comfy model download \
     --filename umt5_xxl_fp8_e4m3fn_scaled.safetensors
 
 # ===================================
-# SECTION 5: WAN 2.2 ANIMATE MODELS
+# LIGHTX2V LORAS (Speed boost)
 # ===================================
 echo ""
-echo "=== Section 5: Wan 2.2 Animate Models ==="
-
-echo "Downloading Wan2.2 Animate 14B model..."
-comfy model download \
-    --url https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/resolve/main/Wan22Animate/Wan2_2-Animate-14B_fp8_e5m2_scaled_KJ.safetensors \
-    --relative-path comfy/ComfyUI/models/diffusion_models \
-    --filename Wan2_2-Animate-14B_fp8_e5m2_scaled_KJ.safetensors
-
-# Optional: Animate Relight LoRA for better lighting
-echo "Downloading Wan Animate Relight LoRA..."
-comfy model download \
-    --url https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/WanAnimate_relight_lora_fp16.safetensors \
-    --relative-path comfy/ComfyUI/models/loras \
-    --filename WanAnimate_relight_lora_fp16.safetensors
-
-# ===================================
-# SECTION 6: WAN 2.2 FUN MODELS
-# ===================================
-echo ""
-echo "=== Section 6: Wan 2.2 Fun Models ==="
-
-echo "Downloading Wan2.2 Fun VACE Module..."
-comfy model download \
-    --url https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/resolve/main/Wan2_2_Fun_VACE_module_A14B_HIGH_fp8_e5m2_scaled_KJ.safetensors \
-    --relative-path comfy/ComfyUI/models/diffusion_models \
-    --filename Wan2_2_Fun_VACE_module_A14B_HIGH_fp8_e5m2_scaled_KJ.safetensors
-
-# Note: Other Wan2.2 Fun models (InP, Control) may not be available yet in working repositories
-echo "NOTE: Wan2.2 Fun InP and Control models not found in working repositories"
-
-# ===================================
-# SECTION 7: LIGHTX2V LORAS (Speed boost)
-# ===================================
-echo ""
-echo "=== Section 7: LightX2V LoRAs for Wan 2.2 ==="
+echo "=== LightX2V LoRAs for Wan 2.2 ==="
 
 echo "Downloading Wan2.2 I2V LightX2V 4-step LoRA..."
 comfy model download \
@@ -198,10 +137,10 @@ comfy model download \
     --filename wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors
 
 # ===================================
-# SECTION 8: DOWNLOAD WORKFLOW JSON FILES
+# DOWNLOAD WORKFLOW JSON FILES
 # ===================================
 echo ""
-echo "=== Section 8: Downloading Workflow JSON Files ==="
+echo "=== Downloading Workflow JSON Files ==="
 
 # Download Qwen-Image workflows
 echo "Downloading Qwen-Image Lightning workflows..."
@@ -348,10 +287,8 @@ echo ""
 echo "Downloaded models summary:"
 echo "-------------------------"
 echo "✓ Qwen-Image: Base model + Lightning LoRAs (4-step, 8-step v1.0 & v1.1)"
-echo "✓ Qwen-Image-Edit: Base model + Lightning LoRAs (2509 skipped - requires auth)"
-echo "✓ Wan 2.2: T2V, I2V models (14B)"
-echo "✓ Wan 2.2 Animate: 14B model + Relight LoRA"
-echo "✓ Wan 2.2 Fun: InP and Control models"
+echo "✓ Qwen-Image-Edit: Base model + Lightning LoRAs"
+echo "✓ Wan 2.2: I2V models (14B)"
 echo "✓ LightX2V: 4-step LoRAs for faster generation"
 echo "✓ Workflows: Multiple JSON workflow files in $WORKFLOW_DIR"
 echo ""
