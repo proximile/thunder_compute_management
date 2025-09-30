@@ -867,14 +867,33 @@ class ThunderComputeManager:
         # Invalidate cache to force refresh
         self._instances_cache = None
         
-        # Extract instance ID from identifier if present
+        # Extract instance ID from identifier (API returns it directly as integer)
         if 'identifier' in result:
-            try:
-                # Assuming identifier format is like "instance_12345" or similar
-                instance_id = int(''.join(filter(str.isdigit, result['identifier'])))
-                result['instance_id'] = instance_id
-            except:
-                pass
+            instance_id = result['identifier']
+            result['instance_id'] = instance_id
+            
+            # Save SSH key to secrets directory if provided
+            if 'key' in result and result['key']:
+                try:
+                    key_path = self.secrets_dir / f"id_rsa_instance_{instance_id}"
+                    with open(key_path, 'w') as f:
+                        f.write(result['key'])
+                    os.chmod(key_path, 0o600)
+                    print(f"SSH key saved to {key_path}")
+                    
+                    # Clear cached connections and keys for this instance ID
+                    if instance_id in self._ssh_connections:
+                        try:
+                            self._ssh_connections[instance_id].close()
+                        except:
+                            pass
+                        del self._ssh_connections[instance_id]
+                    
+                    # Update instance keys cache with new key
+                    self._instance_keys[instance_id] = str(key_path)
+                    
+                except Exception as e:
+                    print(f"Warning: Failed to save SSH key: {e}")
         
         # Wait for instance to be running if requested
         if wait_for_running and 'instance_id' in result:
